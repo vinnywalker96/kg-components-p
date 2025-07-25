@@ -105,3 +105,4 @@ class User(AbstractBaseUser, PermissionsMixin):
         Return the short name for the user.
         """
         return self.first_name
+

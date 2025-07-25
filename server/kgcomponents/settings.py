@@ -29,6 +29,9 @@ DEBUG = config('DEBUG', default=True, cast=bool)
 
 ALLOWED_HOSTS = config('ALLOWED_HOSTS', default='localhost,127.0.0.1', cast=Csv())
 
+# Set the custom user model
+AUTH_USER_MODEL = 'users.User'
+
 # Application definition
 
 INSTALLED_APPS = [
@@ -44,13 +47,10 @@ INSTALLED_APPS = [
     'corsheaders',
     'drf_yasg',
     'phonenumber_field',
-    'shop',
-    'authentication',
-    'users',
+    'users.apps.UsersConfig',
+    'shop.apps.ShopConfig',
+    'authentication.apps.AuthenticationConfig',
 ]
-
-# Set the custom user model
-AUTH_USER_MODEL = 'users.User'
 
 MIDDLEWARE = [
     'corsheaders.middleware.CorsMiddleware',  # Must be first
