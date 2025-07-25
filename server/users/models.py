@@ -28,6 +28,7 @@ class CustomUserManager(BaseUserManager):
         extra_fields.setdefault('is_staff', True)
         extra_fields.setdefault('is_superuser', True)
         extra_fields.setdefault('is_active', True)
+        extra_fields.setdefault('is_verified', True)
         
         if extra_fields.get('is_staff') is not True:
             raise ValueError(_('Superuser must have is_staff=True.'))
@@ -58,6 +59,12 @@ class User(AbstractBaseUser, PermissionsMixin):
     
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+    
+    # Verification and reset tokens
+    verification_token = models.CharField(max_length=100, blank=True, null=True)
+    verification_token_created_at = models.DateTimeField(blank=True, null=True)
+    reset_password_token = models.CharField(max_length=100, blank=True, null=True)
+    reset_password_token_created_at = models.DateTimeField(blank=True, null=True)
 
     # Add related_name attributes to fix the clash with auth.User
     groups = models.ManyToManyField(
