@@ -1,95 +1,42 @@
 from rest_framework import serializers
 from django.utils.translation import gettext_lazy as _
-from django.db import transaction
 from .models import Product, Order, OrderItem, Sale
+from django.db import transaction
+from decimal import Decimal
 
 class ProductSerializer(serializers.ModelSerializer):
     """
-    Serializer for product information.
+    Serializer for Product model.
     """
     class Meta:
         model = Product
-        fields = ['id', 'sku_code', 'name', 'description', 'price', 'image']
-        read_only_fields = ['id']
-
-
-class ProductCreateUpdateSerializer(serializers.ModelSerializer):
-    """
-    Serializer for creating and updating products.
-    """
-    class Meta:
-        model = Product
-        fields = ['sku_code', 'name', 'description', 'price', 'image']
-    
-    def validate_sku_code(self, value):
-        """
-        Validate that the SKU code is unique.
-        """
-        instance = self.instance
-        if instance is None:  # Creating a new product
-            if Product.objects.filter(sku_code=value).exists():
-                raise serializers.ValidationError(_("A product with this SKU code already exists."))
-        else:  # Updating an existing product
-            if Product.objects.exclude(pk=instance.pk).filter(sku_code=value).exists():
-                raise serializers.ValidationError(_("A product with this SKU code already exists."))
-        return value
-    
-    def validate_price(self, value):
-        """
-        Validate that the price is positive.
-        """
-        if value <= 0:
-            raise serializers.ValidationError(_("Price must be greater than zero."))
-        return value
-
+        fields = ['id', 'sku_code', 'name', 'description', 'price', 'image', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'created_at', 'updated_at']
 
 class OrderItemSerializer(serializers.ModelSerializer):
     """
-    Serializer for order item information.
+    Serializer for OrderItem model.
     """
     product_name = serializers.CharField(source='product.name', read_only=True)
     product_price = serializers.DecimalField(source='product.price', max_digits=10, decimal_places=2, read_only=True)
     
     class Meta:
         model = OrderItem
-        fields = ['id', 'product', 'product_name', 'product_price', 'quantity', 'price']
-        read_only_fields = ['id', 'price', 'product_name', 'product_price']
-
-
-class OrderItemCreateSerializer(serializers.ModelSerializer):
-    """
-    Serializer for creating order items.
-    """
-    product_id = serializers.PrimaryKeyRelatedField(
-        source='product',
-        queryset=Product.objects.all()
-    )
-    
-    class Meta:
-        model = OrderItem
-        fields = ['product_id', 'quantity']
-    
-    def validate_quantity(self, value):
-        """
-        Validate that the quantity is positive.
-        """
-        if value <= 0:
-            raise serializers.ValidationError(_("Quantity must be greater than zero."))
-        return value
-
+        fields = ['id', 'product', 'product_name', 'product_price', 'quantity', 'price', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'price', 'created_at', 'updated_at']
 
 class OrderSerializer(serializers.ModelSerializer):
     """
-    Serializer for order information.
+    Serializer for Order model.
     """
     items = OrderItemSerializer(source='orderitem_set', many=True, read_only=True)
-    user_email = serializers.EmailField(source='user.email', read_only=True)
     total_amount = serializers.SerializerMethodField()
+    user_email = serializers.EmailField(source='user.email', read_only=True)
     
     class Meta:
         model = Order
-        fields = ['id', 'user', 'user_email', 'status', 'created_at', 'items', 'total_amount']
-        read_only_fields = ['id', 'user', 'user_email', 'created_at']
+        fields = ['id', 'user', 'user_email', 'status', 'items', 'total_amount', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'user', 'created_at', 'updated_at']
     
     def get_total_amount(self, obj):
         """
@@ -97,85 +44,102 @@ class OrderSerializer(serializers.ModelSerializer):
         """
         return sum(item.price * item.quantity for item in obj.orderitem_set.all())
 
-
-class OrderCreateSerializer(serializers.ModelSerializer):
+class OrderCreateSerializer(serializers.Serializer):
     """
-    Serializer for creating orders.
+    Serializer for creating an order.
     """
-    items = OrderItemCreateSerializer(many=True, write_only=True)
+    status = serializers.ChoiceField(choices=[
+        ('pending', 'Pending'), 
+        ('processing', 'Processing'),
+        ('shipped', 'Shipped'),
+        ('delivered', 'Delivered'),
+        ('completed', 'Completed'),
+        ('cancelled', 'Cancelled')
+    ], default='pending')
     
-    class Meta:
-        model = Order
-        fields = ['status', 'items']
+    items = serializers.ListField(
+        child=serializers.DictField(
+            child=serializers.IntegerField(),
+            allow_empty=False
+        ),
+        min_length=1
+    )
+    
+    def validate_items(self, items):
+        """
+        Validate the items in the order.
+        """
+        validated_items = []
+        
+        for item in items:
+            if 'product_id' not in item or 'quantity' not in item:
+                raise serializers.ValidationError(_("Each item must have 'product_id' and 'quantity'."))
+            
+            product_id = item['product_id']
+            quantity = item['quantity']
+            
+            # Validate quantity
+            if quantity <= 0:
+                raise serializers.ValidationError(_("Quantity must be greater than 0."))
+            
+            # Validate product exists
+            try:
+                product = Product.objects.get(id=product_id)
+                validated_items.append({
+                    'product': product,
+                    'quantity': quantity
+                })
+            except Product.DoesNotExist:
+                raise serializers.ValidationError(_("Product with id '{}' does not exist.").format(product_id))
+        
+        return validated_items
     
     @transaction.atomic
     def create(self, validated_data):
         """
-        Create an order with its items.
+        Create an order with the given items.
         """
-        items_data = validated_data.pop('items')
         user = self.context['request'].user
+        status = validated_data.get('status', 'pending')
+        items = validated_data.get('items', [])
         
-        # Create the order
-        order = Order.objects.create(user=user, **validated_data)
+        # Create order
+        order = Order.objects.create(
+            user=user,
+            status=status
+        )
         
-        # Create the order items
-        for item_data in items_data:
-            product = item_data['product']
-            quantity = item_data['quantity']
-            price = product.price  # Use the current product price
+        # Create order items
+        for item in items:
+            product = item['product']
+            quantity = item['quantity']
             
             OrderItem.objects.create(
                 order=order,
                 product=product,
                 quantity=quantity,
-                price=price
+                price=product.price
             )
         
-        # If the order status is 'completed', create a sale record
-        if order.status == 'completed':
-            total_amount = sum(item.price * item.quantity for item in order.orderitem_set.all())
-            Sale.objects.create(order=order, total_amount=total_amount)
+        # If order is completed, create a sale record
+        if status == 'completed':
+            total_amount = sum(item['product'].price * item['quantity'] for item in items)
+            Sale.objects.create(
+                order=order,
+                total_amount=total_amount
+            )
         
         return order
 
-
-class OrderUpdateSerializer(serializers.ModelSerializer):
-    """
-    Serializer for updating orders.
-    """
-    class Meta:
-        model = Order
-        fields = ['status']
-    
-    @transaction.atomic
-    def update(self, instance, validated_data):
-        """
-        Update an order and create a sale record if the status is changed to 'completed'.
-        """
-        old_status = instance.status
-        new_status = validated_data.get('status', old_status)
-        
-        # Update the order
-        instance = super().update(instance, validated_data)
-        
-        # If the status is changed to 'completed', create a sale record
-        if old_status != 'completed' and new_status == 'completed':
-            total_amount = sum(item.price * item.quantity for item in instance.orderitem_set.all())
-            Sale.objects.create(order=instance, total_amount=total_amount)
-        
-        return instance
-
-
 class SaleSerializer(serializers.ModelSerializer):
     """
-    Serializer for sale information.
+    Serializer for Sale model.
     """
-    order_id = serializers.PrimaryKeyRelatedField(source='order', read_only=True)
+    order_id = serializers.UUIDField(source='order.id', read_only=True)
     user_email = serializers.EmailField(source='order.user.email', read_only=True)
     
     class Meta:
         model = Sale
-        fields = ['id', 'order_id', 'user_email', 'total_amount', 'sale_date']
-        read_only_fields = ['id', 'order_id', 'user_email', 'total_amount', 'sale_date']
+        fields = ['id', 'order_id', 'user_email', 'total_amount', 'sale_date', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'order_id', 'user_email', 'sale_date', 'created_at', 'updated_at']
 

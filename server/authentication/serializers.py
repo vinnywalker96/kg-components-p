@@ -1,11 +1,10 @@
-from django.contrib.auth import get_user_model
 from rest_framework import serializers
-from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
-from rest_framework_simplejwt.tokens import RefreshToken
-from rest_framework.exceptions import AuthenticationFailed
+from django.contrib.auth import get_user_model
 from django.contrib.auth.password_validation import validate_password
-from django.core.exceptions import ValidationError
 from django.utils.translation import gettext_lazy as _
+from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
+from phonenumber_field.serializerfields import PhoneNumberField
+import re
 
 User = get_user_model()
 
@@ -13,12 +12,12 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
     """
     Serializer for user registration.
     """
-    password = serializers.CharField(write_only=True, required=True, style={'input_type': 'password'})
-    password_confirm = serializers.CharField(write_only=True, required=True, style={'input_type': 'password'})
+    password = serializers.CharField(write_only=True, required=True, validators=[validate_password])
+    password_confirm = serializers.CharField(write_only=True, required=True)
     
     class Meta:
         model = User
-        fields = ['email', 'first_name', 'last_name', 'phone_number', 'password', 'password_confirm']
+        fields = ['email', 'password', 'password_confirm', 'first_name', 'last_name', 'phone_number']
         extra_kwargs = {
             'first_name': {'required': True},
             'last_name': {'required': True},
@@ -26,186 +25,123 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
         }
     
     def validate(self, attrs):
-        # Validate that passwords match
+        # Check if passwords match
         if attrs['password'] != attrs['password_confirm']:
             raise serializers.ValidationError({"password_confirm": _("Password fields didn't match.")})
         
-        # Validate password strength
-        try:
-            validate_password(attrs['password'])
-        except ValidationError as e:
-            raise serializers.ValidationError({"password": list(e.messages)})
-            
-        # Validate email uniqueness
-        email = attrs.get('email', '')
+        # Validate email format
+        email = attrs['email']
+        email_regex = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+        if not re.match(email_regex, email):
+            raise serializers.ValidationError({"email": _("Enter a valid email address.")})
+        
+        # Check if email already exists
         if User.objects.filter(email=email).exists():
-            raise serializers.ValidationError({"email": _("A user with this email already exists.")})
-            
+            raise serializers.ValidationError({"email": _("A user with that email already exists.")})
+        
         return attrs
     
     def create(self, validated_data):
-        # Remove password_confirm from the data
-        validated_data.pop('password_confirm', None)
+        # Remove password_confirm from validated data
+        validated_data.pop('password_confirm')
         
-        # Create the user
+        # Create user
         user = User.objects.create_user(
             email=validated_data['email'],
-            first_name=validated_data.get('first_name', ''),
-            last_name=validated_data.get('last_name', ''),
-            phone_number=validated_data.get('phone_number', None),
-            password=validated_data['password']
+            password=validated_data['password'],
+            first_name=validated_data['first_name'],
+            last_name=validated_data['last_name'],
+            phone_number=validated_data.get('phone_number')
         )
         
         return user
 
-
-class AdminRegistrationSerializer(UserRegistrationSerializer):
+class UserLoginSerializer(TokenObtainPairSerializer):
     """
-    Serializer for admin registration.
+    Serializer for user login.
     """
-    
-    def create(self, validated_data):
-        # Remove password_confirm from the data
-        validated_data.pop('password_confirm', None)
-        
-        # Create the admin user
-        user = User.objects.create_superuser(
-            email=validated_data['email'],
-            first_name=validated_data.get('first_name', ''),
-            last_name=validated_data.get('last_name', ''),
-            phone_number=validated_data.get('phone_number', None),
-            password=validated_data['password']
-        )
-        
-        return user
-
-
-class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
-    """
-    Custom token serializer that adds additional claims to the token.
-    """
-    
-    @classmethod
-    def get_token(cls, user):
-        token = super().get_token(user)
-        
-        # Add custom claims
-        token['email'] = user.email
-        token['is_staff'] = user.is_staff
-        token['first_name'] = user.first_name
-        token['last_name'] = user.last_name
-        
-        return token
-    
     def validate(self, attrs):
-        # Get the credentials from the request
-        email = attrs.get('email', '')
-        password = attrs.get('password', '')
+        # Call parent validate method
+        data = super().validate(attrs)
         
-        # Authenticate the user
-        user = User.objects.filter(email=email).first()
-        
-        if not user:
-            raise AuthenticationFailed(_('No user found with this email address.'))
-            
-        if not user.check_password(password):
-            raise AuthenticationFailed(_('Incorrect password.'))
-            
+        # Check if user is active and verified
+        user = self.user
         if not user.is_active:
-            raise AuthenticationFailed(_('Account is not active. Please verify your email.'))
-            
-        # Get the token
-        data = super().validate(attrs)
+            raise serializers.ValidationError(_("User account is disabled."))
         
-        # Add extra responses
-        data['user_id'] = str(user.id)
-        data['email'] = user.email
-        data['is_staff'] = user.is_staff
-        data['first_name'] = user.first_name
-        data['last_name'] = user.last_name
+        if not user.is_verified:
+            raise serializers.ValidationError(_("Email not verified. Please check your email for verification link."))
+        
+        # Add user data to response
+        data.update({
+            'user_id': str(user.id),
+            'email': user.email,
+            'first_name': user.first_name,
+            'last_name': user.last_name,
+            'is_admin': user.is_staff
+        })
         
         return data
 
-
-class AdminTokenObtainPairSerializer(CustomTokenObtainPairSerializer):
+class AdminLoginSerializer(TokenObtainPairSerializer):
     """
-    Token serializer specifically for admin users.
+    Serializer for admin login.
     """
-    
     def validate(self, attrs):
+        # Call parent validate method
         data = super().validate(attrs)
         
-        # Check if the user is an admin
-        if not self.user.is_staff:
-            raise AuthenticationFailed(_('User is not authorized to access admin resources.'))
-            
+        # Check if user is admin
+        user = self.user
+        if not user.is_staff:
+            raise serializers.ValidationError(_("You do not have permission to access the admin panel."))
+        
+        # Add user data to response
+        data.update({
+            'user_id': str(user.id),
+            'email': user.email,
+            'first_name': user.first_name,
+            'last_name': user.last_name,
+            'is_admin': user.is_staff
+        })
+        
         return data
-
-
-class TokenRefreshSerializer(serializers.Serializer):
-    """
-    Serializer for refreshing an access token.
-    """
-    refresh = serializers.CharField()
-    
-    def validate(self, attrs):
-        refresh = attrs.get('refresh')
-        
-        try:
-            token = RefreshToken(refresh)
-            access_token = str(token.access_token)
-            
-            return {
-                'access': access_token,
-                'refresh': str(token)
-            }
-        except Exception as e:
-            raise serializers.ValidationError(_('Invalid or expired token.'))
-
-
-class PasswordResetRequestSerializer(serializers.Serializer):
-    """
-    Serializer for requesting a password reset.
-    """
-    email = serializers.EmailField(required=True)
-    
-    def validate_email(self, value):
-        # Check if a user with this email exists
-        if not User.objects.filter(email=value).exists():
-            raise serializers.ValidationError(_('No user found with this email address.'))
-            
-        return value
-
-
-class PasswordResetConfirmSerializer(serializers.Serializer):
-    """
-    Serializer for confirming a password reset.
-    """
-    token = serializers.CharField(required=True)
-    password = serializers.CharField(write_only=True, required=True, style={'input_type': 'password'})
-    password_confirm = serializers.CharField(write_only=True, required=True, style={'input_type': 'password'})
-    
-    def validate(self, attrs):
-        # Validate that passwords match
-        if attrs['password'] != attrs['password_confirm']:
-            raise serializers.ValidationError({"password_confirm": _("Password fields didn't match.")})
-        
-        # Validate password strength
-        try:
-            validate_password(attrs['password'])
-        except ValidationError as e:
-            raise serializers.ValidationError({"password": list(e.messages)})
-            
-        return attrs
-
 
 class EmailVerificationSerializer(serializers.Serializer):
     """
     Serializer for email verification.
     """
     token = serializers.CharField(required=True)
+
+class PasswordResetRequestSerializer(serializers.Serializer):
+    """
+    Serializer for password reset request.
+    """
+    email = serializers.EmailField(required=True)
+
+class PasswordResetConfirmSerializer(serializers.Serializer):
+    """
+    Serializer for password reset confirmation.
+    """
+    token = serializers.CharField(required=True)
+    password = serializers.CharField(write_only=True, required=True, validators=[validate_password])
+    password_confirm = serializers.CharField(write_only=True, required=True)
     
-    def validate_token(self, value):
-        # Token validation will be handled in the view
-        return value
+    def validate(self, attrs):
+        # Check if passwords match
+        if attrs['password'] != attrs['password_confirm']:
+            raise serializers.ValidationError({"password_confirm": _("Password fields didn't match.")})
+        
+        return attrs
+
+class UserProfileSerializer(serializers.ModelSerializer):
+    """
+    Serializer for user profile.
+    """
+    phone_number = PhoneNumberField(required=False)
+    
+    class Meta:
+        model = User
+        fields = ['id', 'email', 'first_name', 'last_name', 'phone_number', 'physical_address', 'profile_picture']
+        read_only_fields = ['id', 'email']
 

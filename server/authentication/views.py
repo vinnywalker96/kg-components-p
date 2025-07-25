@@ -1,419 +1,247 @@
-from django.contrib.auth import get_user_model
-from django.utils.translation import gettext_lazy as _
-from django.utils.http import urlsafe_base64_encode, urlsafe_base64_decode
-from django.utils.encoding import force_bytes, force_str
-from django.contrib.auth.tokens import default_token_generator
-from django.conf import settings
-
-from rest_framework import status, generics, permissions
-from rest_framework.views import APIView
+from rest_framework import status, generics
 from rest_framework.response import Response
+from rest_framework.permissions import AllowAny, IsAuthenticated, IsAdminUser
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 from rest_framework_simplejwt.tokens import RefreshToken
-from rest_framework_simplejwt.token_blacklist.models import OutstandingToken, BlacklistedToken
-
-from drf_yasg.utils import swagger_auto_schema
-from drf_yasg import openapi
+from rest_framework.throttling import UserRateThrottle
+from django.contrib.auth import get_user_model
+from django.utils.translation import gettext_lazy as _
+from django.conf import settings
+from django.utils import timezone
+import uuid
+import logging
 
 from .serializers import (
     UserRegistrationSerializer,
-    AdminRegistrationSerializer,
-    CustomTokenObtainPairSerializer,
-    AdminTokenObtainPairSerializer,
-    TokenRefreshSerializer,
+    UserLoginSerializer,
+    AdminLoginSerializer,
     PasswordResetRequestSerializer,
     PasswordResetConfirmSerializer,
-    EmailVerificationSerializer
+    EmailVerificationSerializer,
+    UserProfileSerializer
 )
-from .permissions import IsAdmin
-from shop.utils import send_verification_otp_email, send_password_reset_otp_email
 
 User = get_user_model()
+logger = logging.getLogger(__name__)
+
+class LoginRateThrottle(UserRateThrottle):
+    rate = '5/min'
+    scope = 'login'
+
+class RegistrationRateThrottle(UserRateThrottle):
+    rate = '3/hour'
+    scope = 'registration'
+
+class PasswordResetRateThrottle(UserRateThrottle):
+    rate = '3/hour'
+    scope = 'password_reset'
 
 class UserRegistrationView(generics.CreateAPIView):
     """
-    API endpoint for user registration.
+    API view for user registration.
     """
     serializer_class = UserRegistrationSerializer
-    permission_classes = [permissions.AllowAny]
+    permission_classes = [AllowAny]
+    throttle_classes = [RegistrationRateThrottle]
     
-    @swagger_auto_schema(
-        operation_description="Register a new user",
-        responses={
-            201: openapi.Response(
-                description="User registered successfully",
-                schema=openapi.Schema(
-                    type=openapi.TYPE_OBJECT,
-                    properties={
-                        'message': openapi.Schema(type=openapi.TYPE_STRING),
-                        'user_id': openapi.Schema(type=openapi.TYPE_STRING)
-                    }
-                )
-            ),
-            400: "Invalid input"
-        }
-    )
     def post(self, request, *args, **kwargs):
-        serializer = self.get_serializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        user = serializer.save()
+        serializer = self.serializer_class(data=request.data)
+        if serializer.is_valid():
+            user = serializer.save()
+            
+            # Generate verification token
+            token = str(uuid.uuid4())
+            user.verification_token = token
+            user.verification_token_created_at = timezone.now()
+            user.save()
+            
+            # Send verification email
+            # TODO: Implement email sending logic
+            
+            return Response({
+                'message': _('User registered successfully. Please check your email to verify your account.'),
+                'user_id': user.id
+            }, status=status.HTTP_201_CREATED)
         
-        # Generate verification token
-        token = default_token_generator.make_token(user)
-        uid = urlsafe_base64_encode(force_bytes(user.pk))
-        
-        # Send verification email
-        verification_link = f"{settings.FRONTEND_URL}/verify-email/{uid}/{token}/"
-        # TODO: Implement email sending functionality
-        
-        return Response({
-            'message': _('User registered successfully. Please check your email to verify your account.'),
-            'user_id': str(user.id)
-        }, status=status.HTTP_201_CREATED)
-
-
-class AdminRegistrationView(generics.CreateAPIView):
-    """
-    API endpoint for admin registration.
-    """
-    serializer_class = AdminRegistrationSerializer
-    permission_classes = [IsAdmin]
-    
-    @swagger_auto_schema(
-        operation_description="Register a new admin user",
-        responses={
-            201: openapi.Response(
-                description="Admin user registered successfully",
-                schema=openapi.Schema(
-                    type=openapi.TYPE_OBJECT,
-                    properties={
-                        'message': openapi.Schema(type=openapi.TYPE_STRING),
-                        'user_id': openapi.Schema(type=openapi.TYPE_STRING)
-                    }
-                )
-            ),
-            400: "Invalid input",
-            401: "Authentication credentials were not provided",
-            403: "You do not have permission to perform this action"
-        }
-    )
-    def post(self, request, *args, **kwargs):
-        serializer = self.get_serializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        user = serializer.save()
-        
-        return Response({
-            'message': _('Admin user registered successfully.'),
-            'user_id': str(user.id)
-        }, status=status.HTTP_201_CREATED)
-
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 class UserLoginView(TokenObtainPairView):
     """
-    API endpoint for user login.
+    API view for user login.
     """
-    serializer_class = CustomTokenObtainPairSerializer
-    
-    @swagger_auto_schema(
-        operation_description="Login a user and obtain JWT tokens",
-        responses={
-            200: openapi.Response(
-                description="Login successful",
-                schema=openapi.Schema(
-                    type=openapi.TYPE_OBJECT,
-                    properties={
-                        'access': openapi.Schema(type=openapi.TYPE_STRING),
-                        'refresh': openapi.Schema(type=openapi.TYPE_STRING),
-                        'user_id': openapi.Schema(type=openapi.TYPE_STRING),
-                        'email': openapi.Schema(type=openapi.TYPE_STRING),
-                        'is_staff': openapi.Schema(type=openapi.TYPE_BOOLEAN),
-                        'first_name': openapi.Schema(type=openapi.TYPE_STRING),
-                        'last_name': openapi.Schema(type=openapi.TYPE_STRING)
-                    }
-                )
-            ),
-            401: "Invalid credentials"
-        }
-    )
-    def post(self, request, *args, **kwargs):
-        return super().post(request, *args, **kwargs)
-
+    serializer_class = UserLoginSerializer
+    permission_classes = [AllowAny]
+    throttle_classes = [LoginRateThrottle]
 
 class AdminLoginView(TokenObtainPairView):
     """
-    API endpoint for admin login.
+    API view for admin login.
     """
-    serializer_class = AdminTokenObtainPairSerializer
-    
-    @swagger_auto_schema(
-        operation_description="Login an admin user and obtain JWT tokens",
-        responses={
-            200: openapi.Response(
-                description="Login successful",
-                schema=openapi.Schema(
-                    type=openapi.TYPE_OBJECT,
-                    properties={
-                        'access': openapi.Schema(type=openapi.TYPE_STRING),
-                        'refresh': openapi.Schema(type=openapi.TYPE_STRING),
-                        'user_id': openapi.Schema(type=openapi.TYPE_STRING),
-                        'email': openapi.Schema(type=openapi.TYPE_STRING),
-                        'is_staff': openapi.Schema(type=openapi.TYPE_BOOLEAN),
-                        'first_name': openapi.Schema(type=openapi.TYPE_STRING),
-                        'last_name': openapi.Schema(type=openapi.TYPE_STRING)
-                    }
-                )
-            ),
-            401: "Invalid credentials or not an admin"
-        }
-    )
-    def post(self, request, *args, **kwargs):
-        return super().post(request, *args, **kwargs)
-
+    serializer_class = AdminLoginSerializer
+    permission_classes = [AllowAny]
+    throttle_classes = [LoginRateThrottle]
 
 class CustomTokenRefreshView(TokenRefreshView):
     """
-    API endpoint for refreshing an access token.
+    Custom token refresh view with additional security checks.
     """
-    serializer_class = TokenRefreshSerializer
-    
-    @swagger_auto_schema(
-        operation_description="Refresh an access token",
-        responses={
-            200: openapi.Response(
-                description="Token refreshed successfully",
-                schema=openapi.Schema(
-                    type=openapi.TYPE_OBJECT,
-                    properties={
-                        'access': openapi.Schema(type=openapi.TYPE_STRING),
-                        'refresh': openapi.Schema(type=openapi.TYPE_STRING)
-                    }
-                )
-            ),
-            401: "Invalid or expired token"
-        }
-    )
     def post(self, request, *args, **kwargs):
-        return super().post(request, *args, **kwargs)
+        try:
+            return super().post(request, *args, **kwargs)
+        except Exception as e:
+            logger.warning(f"Token refresh failed: {str(e)}")
+            return Response({
+                'error': _('Invalid token or token has expired.')
+            }, status=status.HTTP_401_UNAUTHORIZED)
 
-
-class LogoutView(APIView):
+class LogoutView(generics.GenericAPIView):
     """
-    API endpoint for user logout.
+    API view for user logout.
     """
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [IsAuthenticated]
     
-    @swagger_auto_schema(
-        operation_description="Logout a user by blacklisting the refresh token",
-        request_body=openapi.Schema(
-            type=openapi.TYPE_OBJECT,
-            properties={
-                'refresh': openapi.Schema(type=openapi.TYPE_STRING, description="Refresh token")
-            },
-            required=['refresh']
-        ),
-        responses={
-            200: openapi.Response(
-                description="Logout successful",
-                schema=openapi.Schema(
-                    type=openapi.TYPE_OBJECT,
-                    properties={
-                        'message': openapi.Schema(type=openapi.TYPE_STRING)
-                    }
-                )
-            ),
-            400: "Invalid token",
-            401: "Authentication credentials were not provided"
-        }
-    )
     def post(self, request):
         try:
             refresh_token = request.data.get('refresh')
+            if not refresh_token:
+                return Response({
+                    'error': _('Refresh token is required.')
+                }, status=status.HTTP_400_BAD_REQUEST)
+                
             token = RefreshToken(refresh_token)
             token.blacklist()
             
             return Response({
-                'message': _('Logout successful')
+                'message': _('Logout successful.')
             }, status=status.HTTP_200_OK)
         except Exception as e:
+            logger.error(f"Logout error: {str(e)}")
             return Response({
-                'error': _('Invalid token')
+                'error': _('Invalid token.')
             }, status=status.HTTP_400_BAD_REQUEST)
 
-
-class LogoutAllView(APIView):
+class EmailVerificationView(generics.GenericAPIView):
     """
-    API endpoint for logging out from all devices.
+    API view for email verification.
     """
-    permission_classes = [permissions.IsAuthenticated]
+    serializer_class = EmailVerificationSerializer
+    permission_classes = [AllowAny]
     
-    @swagger_auto_schema(
-        operation_description="Logout a user from all devices by blacklisting all refresh tokens",
-        responses={
-            200: openapi.Response(
-                description="Logout from all devices successful",
-                schema=openapi.Schema(
-                    type=openapi.TYPE_OBJECT,
-                    properties={
-                        'message': openapi.Schema(type=openapi.TYPE_STRING)
-                    }
-                )
-            ),
-            401: "Authentication credentials were not provided"
-        }
-    )
     def post(self, request):
-        tokens = OutstandingToken.objects.filter(user_id=request.user.id)
-        for token in tokens:
-            BlacklistedToken.objects.get_or_create(token=token)
+        serializer = self.serializer_class(data=request.data)
+        if serializer.is_valid():
+            token = serializer.validated_data['token']
             
-        return Response({
-            'message': _('Logged out from all devices')
-        }, status=status.HTTP_200_OK)
-
-
-class PasswordResetRequestView(APIView):
-    """
-    API endpoint for requesting a password reset.
-    """
-    permission_classes = [permissions.AllowAny]
-    
-    @swagger_auto_schema(
-        operation_description="Request a password reset",
-        request_body=PasswordResetRequestSerializer,
-        responses={
-            200: openapi.Response(
-                description="Password reset email sent",
-                schema=openapi.Schema(
-                    type=openapi.TYPE_OBJECT,
-                    properties={
-                        'message': openapi.Schema(type=openapi.TYPE_STRING)
-                    }
-                )
-            ),
-            400: "Invalid input",
-            404: "User not found"
-        }
-    )
-    def post(self, request):
-        serializer = PasswordResetRequestSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        
-        email = serializer.validated_data['email']
-        
-        try:
-            user = User.objects.get(email=email)
-            
-            # Generate password reset token
-            token = default_token_generator.make_token(user)
-            uid = urlsafe_base64_encode(force_bytes(user.pk))
-            
-            # Send password reset email
-            reset_link = f"{settings.FRONTEND_URL}/reset-password/{uid}/{token}/"
-            # TODO: Implement email sending functionality
-            
-            return Response({
-                'message': _('Password reset email sent')
-            }, status=status.HTTP_200_OK)
-        except User.DoesNotExist:
-            return Response({
-                'error': _('User not found')
-            }, status=status.HTTP_404_NOT_FOUND)
-
-
-class PasswordResetConfirmView(APIView):
-    """
-    API endpoint for confirming a password reset.
-    """
-    permission_classes = [permissions.AllowAny]
-    
-    @swagger_auto_schema(
-        operation_description="Confirm a password reset",
-        request_body=PasswordResetConfirmSerializer,
-        responses={
-            200: openapi.Response(
-                description="Password reset successful",
-                schema=openapi.Schema(
-                    type=openapi.TYPE_OBJECT,
-                    properties={
-                        'message': openapi.Schema(type=openapi.TYPE_STRING)
-                    }
-                )
-            ),
-            400: "Invalid input",
-            404: "User not found"
-        }
-    )
-    def post(self, request):
-        serializer = PasswordResetConfirmSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        
-        try:
-            uid, token = serializer.validated_data['token'].split('/')
-            uid = force_str(urlsafe_base64_decode(uid))
-            user = User.objects.get(pk=uid)
-            
-            if default_token_generator.check_token(user, token):
-                user.set_password(serializer.validated_data['password'])
-                user.save()
+            try:
+                user = User.objects.get(verification_token=token)
                 
-                return Response({
-                    'message': _('Password reset successful')
-                }, status=status.HTTP_200_OK)
-            else:
-                return Response({
-                    'error': _('Invalid or expired token')
-                }, status=status.HTTP_400_BAD_REQUEST)
-        except (TypeError, ValueError, OverflowError, User.DoesNotExist):
-            return Response({
-                'error': _('Invalid token')
-            }, status=status.HTTP_400_BAD_REQUEST)
-
-
-class EmailVerificationView(APIView):
-    """
-    API endpoint for email verification.
-    """
-    permission_classes = [permissions.AllowAny]
-    
-    @swagger_auto_schema(
-        operation_description="Verify a user's email",
-        request_body=EmailVerificationSerializer,
-        responses={
-            200: openapi.Response(
-                description="Email verified successfully",
-                schema=openapi.Schema(
-                    type=openapi.TYPE_OBJECT,
-                    properties={
-                        'message': openapi.Schema(type=openapi.TYPE_STRING)
-                    }
-                )
-            ),
-            400: "Invalid input",
-            404: "User not found"
-        }
-    )
-    def post(self, request):
-        serializer = EmailVerificationSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        
-        try:
-            uid, token = serializer.validated_data['token'].split('/')
-            uid = force_str(urlsafe_base64_decode(uid))
-            user = User.objects.get(pk=uid)
-            
-            if default_token_generator.check_token(user, token):
+                # Check if token is expired (24 hours)
+                token_age = timezone.now() - user.verification_token_created_at
+                if token_age.total_seconds() > 86400:  # 24 hours in seconds
+                    return Response({
+                        'error': _('Verification token has expired. Please request a new one.')
+                    }, status=status.HTTP_400_BAD_REQUEST)
+                
+                user.is_verified = True
                 user.is_active = True
+                user.verification_token = None
+                user.verification_token_created_at = None
                 user.save()
                 
                 return Response({
-                    'message': _('Email verified successfully')
+                    'message': _('Email verified successfully. You can now log in.')
                 }, status=status.HTTP_200_OK)
-            else:
+                
+            except User.DoesNotExist:
                 return Response({
-                    'error': _('Invalid or expired token')
+                    'error': _('Invalid verification token.')
                 }, status=status.HTTP_400_BAD_REQUEST)
-        except (TypeError, ValueError, OverflowError, User.DoesNotExist):
-            return Response({
-                'error': _('Invalid token')
-            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+class PasswordResetRequestView(generics.GenericAPIView):
+    """
+    API view for password reset request.
+    """
+    serializer_class = PasswordResetRequestSerializer
+    permission_classes = [AllowAny]
+    throttle_classes = [PasswordResetRateThrottle]
+    
+    def post(self, request):
+        serializer = self.serializer_class(data=request.data)
+        if serializer.is_valid():
+            email = serializer.validated_data['email']
+            
+            try:
+                user = User.objects.get(email=email)
+                
+                # Generate reset token
+                token = str(uuid.uuid4())
+                user.reset_password_token = token
+                user.reset_password_token_created_at = timezone.now()
+                user.save()
+                
+                # Send password reset email
+                # TODO: Implement email sending logic
+                
+                return Response({
+                    'message': _('Password reset link sent to your email.')
+                }, status=status.HTTP_200_OK)
+                
+            except User.DoesNotExist:
+                # Return success even if user doesn't exist for security reasons
+                return Response({
+                    'message': _('Password reset link sent to your email.')
+                }, status=status.HTTP_200_OK)
+        
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+class PasswordResetConfirmView(generics.GenericAPIView):
+    """
+    API view for password reset confirmation.
+    """
+    serializer_class = PasswordResetConfirmSerializer
+    permission_classes = [AllowAny]
+    
+    def post(self, request):
+        serializer = self.serializer_class(data=request.data)
+        if serializer.is_valid():
+            token = serializer.validated_data['token']
+            password = serializer.validated_data['password']
+            
+            try:
+                user = User.objects.get(reset_password_token=token)
+                
+                # Check if token is expired (1 hour)
+                token_age = timezone.now() - user.reset_password_token_created_at
+                if token_age.total_seconds() > 3600:  # 1 hour in seconds
+                    return Response({
+                        'error': _('Password reset token has expired. Please request a new one.')
+                    }, status=status.HTTP_400_BAD_REQUEST)
+                
+                user.set_password(password)
+                user.reset_password_token = None
+                user.reset_password_token_created_at = None
+                user.save()
+                
+                return Response({
+                    'message': _('Password reset successful. You can now log in with your new password.')
+                }, status=status.HTTP_200_OK)
+                
+            except User.DoesNotExist:
+                return Response({
+                    'error': _('Invalid password reset token.')
+                }, status=status.HTTP_400_BAD_REQUEST)
+        
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+class UserProfileView(generics.RetrieveUpdateAPIView):
+    """
+    API view for retrieving and updating user profile.
+    """
+    serializer_class = UserProfileSerializer
+    permission_classes = [IsAuthenticated]
+    
+    def get_object(self):
+        return self.request.user
 
