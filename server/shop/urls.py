@@ -1,25 +1,17 @@
 from django.urls import path
 from .views import (
-    # Product views
     ProductListView,
     ProductDetailView,
     ProductCreateView,
     ProductUpdateView,
     ProductDeleteView,
-    
-    # Order views
     OrderListView,
     OrderDetailView,
     OrderCreateView,
     OrderUpdateView,
-    
-    # Sale views
     SaleListView,
-    SaleDetailView,
-    
-    # Analytics views
-    SalesAnalyticsView,
-    ProductAnalyticsView
+    sales_analytics,
+    product_analytics
 )
 
 app_name = 'shop'
@@ -38,12 +30,11 @@ urlpatterns = [
     path('orders/create/', OrderCreateView.as_view(), name='order-create'),
     path('orders/<uuid:id>/update/', OrderUpdateView.as_view(), name='order-update'),
     
-    # Sale endpoints (admin only)
+    # Sale endpoints
     path('sales/', SaleListView.as_view(), name='sale-list'),
-    path('sales/<uuid:id>/', SaleDetailView.as_view(), name='sale-detail'),
     
-    # Analytics endpoints (admin only)
-    path('analytics/sales/', SalesAnalyticsView.as_view(), name='sales-analytics'),
-    path('analytics/products/', ProductAnalyticsView.as_view(), name='product-analytics'),
+    # Analytics endpoints
+    path('analytics/sales/', sales_analytics, name='sales-analytics'),
+    path('analytics/products/', product_analytics, name='product-analytics'),
 ]
 

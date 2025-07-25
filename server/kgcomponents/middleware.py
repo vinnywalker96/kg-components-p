@@ -1,17 +1,20 @@
 import re
 import logging
-import time
-from django.conf import settings
-from django.http import HttpResponseForbidden
+from django.http import HttpResponseBadRequest
 from django.utils.deprecation import MiddlewareMixin
 
 logger = logging.getLogger(__name__)
 
-class SecurityHeadersMiddleware(MiddlewareMixin):
+class SecurityHeadersMiddleware:
     """
-    Middleware to add security headers to all responses.
+    Middleware to add security headers to responses.
     """
-    def process_response(self, request, response):
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        response = self.get_response(request)
+        
         # Add security headers
         response['X-Content-Type-Options'] = 'nosniff'
         response['X-Frame-Options'] = 'DENY'
@@ -19,34 +22,29 @@ class SecurityHeadersMiddleware(MiddlewareMixin):
         response['Referrer-Policy'] = 'strict-origin-when-cross-origin'
         response['Permissions-Policy'] = 'geolocation=(), microphone=(), camera=()'
         
-        # Add Content-Security-Policy in production
-        if not settings.DEBUG:
+        # Add Content Security Policy in production
+        if not request.META.get('HTTP_HOST', '').startswith(('localhost', '127.0.0.1')):
             response['Content-Security-Policy'] = "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self'"
         
         return response
 
+class RequestLoggingMiddleware:
+    """
+    Middleware to log requests.
+    """
+    def __init__(self, get_response):
+        self.get_response = get_response
 
-class RequestLoggingMiddleware(MiddlewareMixin):
-    """
-    Middleware to log all requests for security auditing.
-    """
-    def process_request(self, request):
-        # Set request start time
-        request.start_time = time.time()
-        
-        # Log the request
+    def __call__(self, request):
+        # Log request
         logger.info(f"Request: {request.method} {request.path} from {request.META.get('REMOTE_ADDR')}")
         
-        return None
-    
-    def process_response(self, request, response):
-        # Calculate request duration
-        if hasattr(request, 'start_time'):
-            duration = time.time() - request.start_time
-            logger.info(f"Response: {response.status_code} in {duration:.2f}s")
+        response = self.get_response(request)
+        
+        # Log response
+        logger.info(f"Response: {response.status_code} for {request.method} {request.path}")
         
         return response
-
 
 class SQLInjectionProtectionMiddleware(MiddlewareMixin):
     """
@@ -55,37 +53,37 @@ class SQLInjectionProtectionMiddleware(MiddlewareMixin):
     def process_request(self, request):
         # Check for SQL injection patterns in GET parameters
         for key, value in request.GET.items():
-            if self._contains_sql_injection(value):
+            if isinstance(value, str) and self._contains_sql_injection(value):
                 logger.warning(f"Potential SQL injection detected in GET parameter: {key}={value}")
-                return HttpResponseForbidden("Forbidden")
+                return HttpResponseBadRequest("Invalid request")
         
         # Check for SQL injection patterns in POST parameters
-        if request.method == 'POST' and request.content_type == 'application/x-www-form-urlencoded':
-            for key, value in request.POST.items():
-                if self._contains_sql_injection(value):
-                    logger.warning(f"Potential SQL injection detected in POST parameter: {key}={value}")
-                    return HttpResponseForbidden("Forbidden")
+        for key, value in request.POST.items():
+            if isinstance(value, str) and self._contains_sql_injection(value):
+                logger.warning(f"Potential SQL injection detected in POST parameter: {key}={value}")
+                return HttpResponseBadRequest("Invalid request")
         
         return None
     
     def _contains_sql_injection(self, value):
         """
-        Check if a value contains SQL injection patterns.
+        Check if a string contains SQL injection patterns.
         """
-        if not isinstance(value, str):
-            return False
-        
-        # Common SQL injection patterns
-        patterns = [
-            r'(\s|^)(SELECT|INSERT|UPDATE|DELETE|DROP|ALTER|EXEC|UNION|CREATE|WHERE)(\s|$)',
-            r'(\s|^)(OR|AND)(\s+)(\d+|\'[^\']*\'|\"[^\"]*\")(\s*)(=|<|>|<=|>=)(\s*)(\d+|\'[^\']*\'|\"[^\"]*\")',
+        # List of SQL injection patterns
+        sql_patterns = [
+            r'(\s|^)(SELECT|INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|TRUNCATE)(\s|$)',
+            r'(\s|^)(UNION|JOIN|AND|OR)(\s|$)',
             r'--',
+            r';(\s|$)',
             r'\/\*.*\*\/',
-            r';.*',
-            r'(\s|^)(SLEEP|BENCHMARK|WAITFOR|DELAY)(\s*)\(',
+            r'1=1',
+            r'1\s*=\s*1',
+            r"'(\s|$)",
+            r'"(\s|$)',
         ]
         
-        for pattern in patterns:
+        # Check each pattern
+        for pattern in sql_patterns:
             if re.search(pattern, value, re.IGNORECASE):
                 return True
         
