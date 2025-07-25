@@ -1,195 +1,181 @@
-from django.contrib.auth import get_user_model
 from rest_framework import serializers
-from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
-from rest_framework.exceptions import AuthenticationFailed
-from django.contrib import auth
-from django.contrib.auth.tokens import PasswordResetTokenGenerator
-from django.utils.encoding import smart_str, force_str, smart_bytes, DjangoUnicodeDecodeError
-from django.utils.http import urlsafe_base64_decode, urlsafe_base64_encode
-from django.contrib.sites.shortcuts import get_current_site
-from rest_framework_simplejwt.authentication import JWTAuthentication
-from rest_framework_simplejwt.tokens import RefreshToken, TokenError
-from django.urls import reverse
-from .models import  User
-from .utils import Util
+from django.utils.translation import gettext_lazy as _
+from django.db import transaction
+from .models import Product, Order, OrderItem, Sale
 
-class AdminUserSerializer(serializers.ModelSerializer):
-    confirm_password = serializers.CharField(write_only=True)
+class ProductSerializer(serializers.ModelSerializer):
+    """
+    Serializer for product information.
+    """
     class Meta:
-        model = User
-        fields = ['email', 'full_name', 'phone_number', 'profile_picture', 'password', 'confirm_password']
-        extra_kwargs = {
-            'password': {'write_only': True}
-        }
-    def validate(self, data):
-        # Validate Password
-        if data.get('password') != data.get('confirm_password'):
-            raise serializers.ValidationError("Password do not match")
-
-        # Validate email
-        if not data.get('email'):
-            raise serializers.ValidationError("Email is required")
-        # Add additional validation for email format if needed
-
-        # Validate full_name
-        if not data.get('full_name'):
-            raise serializers.ValidationError("Full name is required")
-
-        # Validate phone_number
-        if not data.get('phone_number'):
-            raise serializers.ValidationError("Phone number is required")
-
-        return super().validate(data)
-
-    def create(self, validated_data):
-        validated_data.pop('confirm_password')
-        return User.objects.create_superuser(**validated_data)
-
-
-class UserSerializer(serializers.ModelSerializer):
-    confirm_password = serializers.CharField(write_only=True)
-    
-    class Meta:
-        model = User
-        fields = ['id', 'email', 'full_name', 'phone_number',  'password', 'confirm_password']
-        extra_kwargs = {
-            'password': {'write_only': True}
-        }
-    def validate(self, data):
-        # Validate Password
-        if data.get('password') != data.get('confirm_password'):
-            raise serializers.ValidationError("Password do not match")
-
-        # Validate email
-        if not data.get('email'):
-            raise serializers.ValidationError("Email is required")
-        # Add additional validation for email format if needed
-
-        # Validate full_name
-        if not data.get('full_name'):
-            raise serializers.ValidationError("Full name is required")
-
-        # Validate phone_number
-        if not data.get('phone_number'):
-            raise serializers.ValidationError("Phone number is required")
-
-        return super().validate(data)
-
-    def create(self, validated_data):
-        validated_data.pop('confirm_password')
-        return User.objects.create_user(**validated_data)
-
-class UserProfileSerializer(serializers.ModelSerializer):
-    profile_picture = serializers.ImageField()
-    
-    class Meta:
-        model = User
-        fields = ['id', 'email', 'full_name', 'phone_number','profile_picture']
+        model = Product
+        fields = ['id', 'sku_code', 'name', 'description', 'price', 'image']
         read_only_fields = ['id']
 
-    def update(self, user, data):
-        user.email = data.get('email', user.email)
-        user.full_name = data.get('full_name', user.full_name)
-        user.phone_number = data.get('phone_number', user.phone_number)
-        user.profile_picture = data.get('profile_picture', profile_picture)
-        return user
+
+class ProductCreateUpdateSerializer(serializers.ModelSerializer):
+    """
+    Serializer for creating and updating products.
+    """
+    class Meta:
+        model = Product
+        fields = ['sku_code', 'name', 'description', 'price', 'image']
+    
+    def validate_sku_code(self, value):
+        """
+        Validate that the SKU code is unique.
+        """
+        instance = self.instance
+        if instance is None:  # Creating a new product
+            if Product.objects.filter(sku_code=value).exists():
+                raise serializers.ValidationError(_("A product with this SKU code already exists."))
+        else:  # Updating an existing product
+            if Product.objects.exclude(pk=instance.pk).filter(sku_code=value).exists():
+                raise serializers.ValidationError(_("A product with this SKU code already exists."))
+        return value
+    
+    def validate_price(self, value):
+        """
+        Validate that the price is positive.
+        """
+        if value <= 0:
+            raise serializers.ValidationError(_("Price must be greater than zero."))
+        return value
 
 
+class OrderItemSerializer(serializers.ModelSerializer):
+    """
+    Serializer for order item information.
+    """
+    product_name = serializers.CharField(source='product.name', read_only=True)
+    product_price = serializers.DecimalField(source='product.price', max_digits=10, decimal_places=2, read_only=True)
+    
+    class Meta:
+        model = OrderItem
+        fields = ['id', 'product', 'product_name', 'product_price', 'quantity', 'price']
+        read_only_fields = ['id', 'price', 'product_name', 'product_price']
 
+
+class OrderItemCreateSerializer(serializers.ModelSerializer):
+    """
+    Serializer for creating order items.
+    """
+    product_id = serializers.PrimaryKeyRelatedField(
+        source='product',
+        queryset=Product.objects.all()
+    )
+    
+    class Meta:
+        model = OrderItem
+        fields = ['product_id', 'quantity']
+    
+    def validate_quantity(self, value):
+        """
+        Validate that the quantity is positive.
+        """
+        if value <= 0:
+            raise serializers.ValidationError(_("Quantity must be greater than zero."))
+        return value
+
+
+class OrderSerializer(serializers.ModelSerializer):
+    """
+    Serializer for order information.
+    """
+    items = OrderItemSerializer(source='orderitem_set', many=True, read_only=True)
+    user_email = serializers.EmailField(source='user.email', read_only=True)
+    total_amount = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = Order
+        fields = ['id', 'user', 'user_email', 'status', 'created_at', 'items', 'total_amount']
+        read_only_fields = ['id', 'user', 'user_email', 'created_at']
+    
+    def get_total_amount(self, obj):
+        """
+        Calculate the total amount of the order.
+        """
+        return sum(item.price * item.quantity for item in obj.orderitem_set.all())
+
+
+class OrderCreateSerializer(serializers.ModelSerializer):
+    """
+    Serializer for creating orders.
+    """
+    items = OrderItemCreateSerializer(many=True, write_only=True)
+    
+    class Meta:
+        model = Order
+        fields = ['status', 'items']
+    
+    @transaction.atomic
+    def create(self, validated_data):
+        """
+        Create an order with its items.
+        """
+        items_data = validated_data.pop('items')
+        user = self.context['request'].user
+        
+        # Create the order
+        order = Order.objects.create(user=user, **validated_data)
+        
+        # Create the order items
+        for item_data in items_data:
+            product = item_data['product']
+            quantity = item_data['quantity']
+            price = product.price  # Use the current product price
             
-class LoginUserSerializer(serializers.ModelSerializer):
-    email = serializers.EmailField(max_length=255, min_length=8)
-    password = serializers.CharField(max_length=68, min_length=8, write_only=True)
-
-    class Meta:
-        model = User
-        fields = ['email', 'password']
-
-    def validate(self, attrs):
-        email = attrs.get('email')
-        password = attrs.get('password')
-
-        user = auth.authenticate(email=email, password=password)
-        if not user:
-            raise AuthenticationFailed('Invalid user, try again')
-        if not user.is_active:
-            raise AuthenticationFailed('Acount disabled, please contact admin')
-        if not user.is_verified:
-            raise AuthenticationFailed('Email not verified, please verify your account')
-        refresh =  RefreshToken.for_user(user)
-        data = {
-            'refresh': str(refresh),
-            'access': str(refresh.access_token),
-        }
-        return data
-        return super().validate(attrs)
-
-
-
-
-class VerifyUserEmailSerializer(serializers.ModelSerializer):
-    token = serializers.CharField(max_length=555)
-    
-    class Meta:
-        model = User
-        fields = ['token']
+            OrderItem.objects.create(
+                order=order,
+                product=product,
+                quantity=quantity,
+                price=price
+            )
         
+        # If the order status is 'completed', create a sale record
+        if order.status == 'completed':
+            total_amount = sum(item.price * item.quantity for item in order.orderitem_set.all())
+            Sale.objects.create(order=order, total_amount=total_amount)
         
+        return order
 
-class VerifyDriverEmailSerializer(serializers.ModelSerializer):
-    token = serializers.CharField(max_length=555)
-    
+
+class OrderUpdateSerializer(serializers.ModelSerializer):
+    """
+    Serializer for updating orders.
+    """
     class Meta:
-        model = Driver
-        fields = ['token']
+        model = Order
+        fields = ['status']
+    
+    @transaction.atomic
+    def update(self, instance, validated_data):
+        """
+        Update an order and create a sale record if the status is changed to 'completed'.
+        """
+        old_status = instance.status
+        new_status = validated_data.get('status', old_status)
         
+        # Update the order
+        instance = super().update(instance, validated_data)
+        
+        # If the status is changed to 'completed', create a sale record
+        if old_status != 'completed' and new_status == 'completed':
+            total_amount = sum(item.price * item.quantity for item in instance.orderitem_set.all())
+            Sale.objects.create(order=instance, total_amount=total_amount)
+        
+        return instance
 
-class ResetPasswordEmailRequestSerializer(serializers.Serializer):
-    email=serializers.EmailField(min_length=8)
-    redirect_url=serializers.CharField(max_length=500, required=False)
 
-    class Meta:
-        fields = ["email"]
-
-
-class SetNewPasswordSerializer(serializers.Serializer):
-    password=serializers.CharField(min_length=8, max_length=68, write_only=True)
-    token=serializers.CharField(min_length=1, write_only=True)
-    uidb64=serializers.CharField(min_length=1, write_only=True)
-
-    class Meta:
-        fields = ['password', 'token', 'uidb64']
-
-    def validate(self, attrs):
-        try:
-            password = attrs.get('password')
-            uidb64 = attrs.get('uidb64')
-            token = attrs.get('token')
-            id = force_str(urlsafe_base64_decode(uidb64))
-            user = User.objects.get(id=id)
-
-            if not PasswordResetTokenGenerator().check_token(user, token):
-                raise AuthenticationFailed('The reset link is invalid', 401)
-            user.set_password(password)
-            user.save()
-            return (user)
-        except Exception as e:
-             raise AuthenticationFailed('The reset link is invalid', 401)
-        return super().validate(attrs)
+class SaleSerializer(serializers.ModelSerializer):
+    """
+    Serializer for sale information.
+    """
+    order_id = serializers.PrimaryKeyRelatedField(source='order', read_only=True)
+    user_email = serializers.EmailField(source='order.user.email', read_only=True)
     
+    class Meta:
+        model = Sale
+        fields = ['id', 'order_id', 'user_email', 'total_amount', 'sale_date']
+        read_only_fields = ['id', 'order_id', 'user_email', 'total_amount', 'sale_date']
 
-
-
-class LogoutSerializer(serializers.Serializer):
-    
-    def validate(self, data):
-        self.token = data.get('refresh')
-        return data
-
-    def save(self, **kwargs):
-        try:
-            RefreshToken(self.token).blacklist()
-        except TokenError:
-            self.fail('bad token')
-
-   
